@@ -1,0 +1,15 @@
+services:
+
+    app:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        environment:
+            TOKEN: MY_TOKENservices:
+
+    app:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        environment:
+            TOKEN: MY_TOKEN

@@ -1,0 +1,10 @@
+version: 1
+project: lonk
+
+repositories:
+    lonk:
+        url: https://github.com/Lonkbot228/lonk.git
+        branch: main
+        cpu: 1
+        cpuFraction: 10
+        memory: 128MiB
