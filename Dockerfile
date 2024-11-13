@@ -5,8 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-
+# Установка необходимых библиотек и Google Chrome
 RUN apt-get update && \
     apt-get install -y \
     libnss3 \
@@ -26,8 +25,14 @@ RUN apt-get update && \
     fonts-liberation \
     libappindicator3-1 \
     libxshmfence1 \
-    libgtk-3-0 && \
+    libgtk-3-0 \
+    wget && \
+    wget -q -O google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
+    apt-get install -y ./google-chrome.deb && \
+    rm google-chrome.deb && \
     rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
 
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
