@@ -95,6 +95,10 @@ async def schedule(update: Update, context):
     except Exception as e:
         await update.message.reply_text(f"Произошла ошибка: {e}")
 
+# Функция для команды /nikas в Telegram
+async def nikas(update: Update, context):
+    await update.message.reply_text('<b>пошел нахуй</b>', parse_mode="HTML")
+
 # Настройка бота
 def main():
     # Получение токена из переменной окружения
@@ -104,6 +108,7 @@ def main():
     # Обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("schedule", schedule))
+    application.add_handler(CommandHandler("nikas", nikas))  # Добавлена команда /nikas
 
     # Запуск бота
     application.run_polling()
