@@ -6,10 +6,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from icalendar import Calendar
-import datetime
-import re
+import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler
+import datetime
+import re
+from babel.dates import format_date  # Для преобразования даты в русский формат
 
 # Настройка Selenium
 options = webdriver.ChromeOptions()
@@ -31,11 +33,9 @@ def read_ics_file():
         print("Файл sa17.ics не найден. Используется резервная логика.")
         return None
 
-# Функция для извлечения данных из строки
-def extract_data(text, key):
-    pattern = rf"{key}:\s*(.+?)\|"
-    match = re.search(pattern, text)
-    return match.group(1).strip() if match else "Не указано"
+# Функция для преобразования даты в русский формат
+def format_date_russian(date):
+    return format_date(date, format="d MMMM, EEEE", locale="ru")
 
 # Функция для получения данных из iCalendar
 def get_schedule_from_ics(calendar, target_date):
@@ -45,25 +45,15 @@ def get_schedule_from_ics(calendar, target_date):
             event_start = component.get("DTSTART").dt.date()
             if event_start == target_date:
                 description = component.get("DESCRIPTION", "")
-                time = extract_data(description, "Время")
-                room = extract_data(description, "Кабинет")
-                teacher = extract_data(description, "Преподаватель")
-
-                # Преобразуем время в объект для сортировки
-                try:
-                    parsed_time = datetime.datetime.strptime(time, "%H:%M").time()
-                except ValueError:
-                    parsed_time = None
+                time_match = re.search(r"Время:\s*(\d{2}:\d{2})", description)
+                room_match = re.search(r"Кабинет:\s*(.*?)\s*\|", description)  # Исправлено
+                teacher_match = re.search(r"Преподаватель:\s*(.*?)\s*\|", description)  # Исправлено
 
                 schedule.append({
-                    "time": time,
-                    "room": room,
-                    "teacher": teacher,
-                    "parsed_time": parsed_time,
+                    "time": time_match.group(1) if time_match else "Не указано",
+                    "room": room_match.group(1).strip() if room_match else "Не указано",
+                    "teacher": teacher_match.group(1).strip() if teacher_match else "Не указано",
                 })
-
-    # Сортировка по времени (раньше начинается - выше в списке)
-    schedule.sort(key=lambda x: x["parsed_time"] if x["parsed_time"] else datetime.time(23, 59))
     return schedule
 
 # Функция для получения расписания через Selenium
@@ -74,7 +64,7 @@ def get_schedule_from_web():
     group_select.send_keys('СА-17')
     submit_button = driver.find_element(By.NAME, 'stt')
     submit_button.click()
-    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    time.sleep(3)
     schedule_data = driver.find_element(By.TAG_NAME, 'body').text
     start_index = schedule_data.find('_________________')
     if start_index != -1:
@@ -82,7 +72,7 @@ def get_schedule_from_web():
     schedule_data = schedule_data.replace("_________________", "").replace("На сайт", "")
     return schedule_data
 
-# Функция для объединения данных расписания
+# Функция для обработки расписания
 def format_combined_schedule(target_date):
     calendar = read_ics_file()
     ics_schedule = []
@@ -93,10 +83,15 @@ def format_combined_schedule(target_date):
     formatted_schedule = format_schedule(web_schedule, ics_schedule, target_date)
     return formatted_schedule
 
+# Функция для сортировки по времени
+def sort_schedule_by_time(events):
+    return sorted(events, key=lambda x: datetime.datetime.strptime(x['time'], '%H:%M'))
+
 # Функция для форматирования расписания
 def format_schedule(web_data, ics_schedule, target_date):
-    formatted_schedule = f"📅 <b>{target_date.strftime('%d %B, %A')}</b>\n\n"
+    formatted_schedule = f"📅 <b>{format_date_russian(target_date)}</b>\n\n"
     lines = web_data.split('\n')
+    current_date = ""
     events = []
 
     # Старый способ извлечения предметов из веб-расписания
@@ -109,16 +104,29 @@ def format_schedule(web_data, ics_schedule, target_date):
                 events.append({"time": time_line, "subject": subject_line})
 
     # Объединение данных из ics и веб-расписания
-    for event in events:
-        # Найдём соответствующее событие из iCalendar по времени
-        ics_event = next((e for e in ics_schedule if e["time"] == event["time"]), None)
+    for i, event in enumerate(events):
+        if i < len(ics_schedule):
+            event.update(ics_schedule[i])  # Обновляем данные из ics
         formatted_schedule += (
             f"🕒 <b>{event['time']}</b>\n"
             f"📚 {event.get('subject', 'Не указано')}\n"
-            f"🏫 {ics_event['room'] if ics_event else 'Не указано'}\n"
-            f"✍️ {ics_event['teacher'] if ics_event else 'Не указано'}\n\n"
+            f"🏫 {event.get('room', 'Не указано')}\n"
+            f"✍️ {event.get('teacher', 'Не указано')}\n\n"
         )
 
+    # Сортировка расписания по времени
+    events_sorted = sort_schedule_by_time(events)
+    
+    # Переформатирование после сортировки
+    formatted_schedule = ""
+    for event in events_sorted:
+        formatted_schedule += (
+            f"🕒 <b>{event['time']}</b>\n"
+            f"📚 {event.get('subject', 'Не указано')}\n"
+            f"🏫 {event.get('room', 'Не указано')}\n"
+            f"✍️ {event.get('teacher', 'Не указано')}\n\n"
+        )
+    
     return formatted_schedule
 
 # Функция для команды /start в Telegram
