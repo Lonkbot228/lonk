@@ -36,29 +36,40 @@ def get_schedule():
     schedule_data = schedule_data.replace("_________________", "").replace("На сайт", "")
     return schedule_data
 
-# Функция для форматирования расписания
+# Переработанная функция для форматирования расписания
 def format_schedule(data):
     formatted_schedule = ""
-    lines = data.split('\n')
-    current_date = ""
-    first_event_of_day = True
+    lines = data.split('\n')  # Разбиваем расписание на строки
+    current_date = ""         # Хранит текущую дату
+    first_event_of_day = True # Флаг для обработки первого события дня
 
-    for line in lines:
+    for i, line in enumerate(lines):
         line = line.strip()
         if line == "":
-            continue
-        if "ауд." in line:
-            line += "\n"
+            continue  # Пропускаем пустые строки
+
+        # Проверка на дату
         date_match = re.match(r"(\d{1,2} \w+, \w+)", line)
         if date_match:
             if current_date != date_match.group(1):
                 current_date = date_match.group(1)
                 formatted_schedule += f"\n📅 <b>{current_date}</b>\n\n"
                 first_event_of_day = True
-        else:
-            if first_event_of_day:
-                first_event_of_day = False
-            formatted_schedule += f"{line}\n"
+            continue  # Переход к следующей строке, если это дата
+
+        # Проверка на наличие слова "ауд."
+        if "ауд." in line:
+            if i >= 2:  # Проверяем наличие двух строк выше текущей
+                time_line = lines[i - 2].strip()  # Строка времени
+                subject_line = lines[i - 1].strip()  # Строка названия пары
+                audience_and_teacher = line.strip()  # Аудитория и преподаватель
+
+                # Форматируем событие
+                formatted_schedule += (
+                    f"🕒 <b>{time_line}</b>\n"
+                    f"📚 {subject_line}\n"
+                    f"🏫 {audience_and_teacher}\n\n"
+                )
 
     return formatted_schedule
 
