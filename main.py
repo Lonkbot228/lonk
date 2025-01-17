@@ -11,6 +11,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler
 import datetime
 import re
+from babel.dates import format_date  # Для преобразования даты в русский формат
 
 # Настройка Selenium
 options = webdriver.ChromeOptions()
@@ -32,27 +33,26 @@ def read_ics_file():
         print("Файл sa17.ics не найден. Используется резервная логика.")
         return None
 
-# Функция для получения расписания из файла iCalendar
+# Функция для преобразования даты в русский формат
+def format_date_russian(date):
+    return format_date(date, format="d MMMM, EEEE", locale="ru")
+
+# Функция для получения данных из iCalendar
 def get_schedule_from_ics(calendar, target_date):
     schedule = []
     for component in calendar.walk():
         if component.name == "VEVENT":
-            event_start = component.get("DTSTART").dt
-            event_end = component.get("DTEND").dt
-            summary = component.get("SUMMARY")
-            location = component.get("LOCATION", "Не указано")
-            description = component.get("DESCRIPTION", "")
-
-            # Проверяем, относится ли событие к целевому дню
-            if isinstance(event_start, datetime.datetime):
-                event_start = event_start.date()
+            event_start = component.get("DTSTART").dt.date()
             if event_start == target_date:
+                description = component.get("DESCRIPTION", "")
+                time_match = re.search(r"Время:\s*(\d{2}:\d{2})", description)
+                room_match = re.search(r"Кабинет:\s*(.+)", description)
+                teacher_match = re.search(r"Преподаватель:\s*(.+)", description)
+
                 schedule.append({
-                    "start_time": component.get("DTSTART").dt.strftime("%H:%M"),
-                    "end_time": component.get("DTEND").dt.strftime("%H:%M"),
-                    "summary": summary,
-                    "location": location,
-                    "description": description,
+                    "time": time_match.group(1) if time_match else "Не указано",
+                    "room": room_match.group(1).strip() if room_match else "Не указано",
+                    "teacher": teacher_match.group(1).strip() if teacher_match else "Не указано",
                 })
     return schedule
 
@@ -72,62 +72,43 @@ def get_schedule_from_web():
     schedule_data = schedule_data.replace("_________________", "").replace("На сайт", "")
     return schedule_data
 
-# Функция для форматирования расписания
-def format_schedule_from_ics(schedule, date):
-    formatted_schedule = f"📅 <b>{date.strftime('%d %B, %A')}</b>\n\n"
-    if not schedule:
-        formatted_schedule += "Нет данных в календаре для этой даты.\n"
-    else:
-        for event in schedule:
-            formatted_schedule += (
-                f"🕒 <b>{event['start_time']} - {event['end_time']}</b>\n"
-                f"📚 {event['summary']}\n"
-                f"🏫 {event['location']}\n"
-                f"✍️ {event['description']}\n\n"
-            )
-    return formatted_schedule
-
 # Функция для обработки расписания
 def format_combined_schedule(target_date):
     calendar = read_ics_file()
+    ics_schedule = []
     if calendar:
         ics_schedule = get_schedule_from_ics(calendar, target_date)
-        if ics_schedule:
-            return format_schedule_from_ics(ics_schedule, target_date)
-    # Если в календаре нет данных, используется веб-скрапинг
+
     web_schedule = get_schedule_from_web()
-    return format_schedule(web_schedule)
+    formatted_schedule = format_schedule(web_schedule, ics_schedule, target_date)
+    return formatted_schedule
 
-# Переработанная функция для веб-расписания
-def format_schedule(data):
-    formatted_schedule = ""
-    lines = data.split('\n')  # Разбиваем расписание на строки
-    current_date = ""         # Хранит текущую дату
+# Функция для форматирования расписания
+def format_schedule(web_data, ics_schedule, target_date):
+    formatted_schedule = f"📅 <b>{format_date_russian(target_date)}</b>\n\n"
+    lines = web_data.split('\n')
+    current_date = ""
+    events = []
 
+    # Старый способ извлечения предметов из веб-расписания
     for i, line in enumerate(lines):
         line = line.strip()
-        if line == "":
-            continue  # Пропускаем пустые строки
-
-        # Проверка на наличие слова "ауд."
         if "ауд." in line:
-            if i >= 3:  # Проверяем наличие трёх строк выше текущей
-                date_line = lines[i - 3].strip()  # Строка с датой
-                time_line = lines[i - 2].strip()  # Строка с временем
-                subject_line = lines[i - 1].strip()  # Строка с названием пары
-                audience_and_teacher = line.strip()  # Аудитория и преподаватель
+            if i >= 3:  # Проверяем, есть ли три строки выше текущей
+                time_line = lines[i - 2].strip()  # Время
+                subject_line = lines[i - 1].strip()  # Название пары
+                events.append({"time": time_line, "subject": subject_line})
 
-                # Если дата изменилась, добавляем её в расписание
-                if current_date != date_line:
-                    current_date = date_line
-                    formatted_schedule += f"\n📅 <b>{current_date}</b>\n\n"
-
-                # Форматируем событие
-                formatted_schedule += (
-                    f"🕒 <b>{time_line}</b>\n"
-                    f"📚 {subject_line}\n"
-                    f"🏫 {audience_and_teacher}\n\n"
-                )
+    # Объединение данных из ics и веб-расписания
+    for i, event in enumerate(events):
+        if i < len(ics_schedule):
+            event.update(ics_schedule[i])  # Обновляем данные из ics
+        formatted_schedule += (
+            f"🕒 <b>{event['time']}</b>\n"
+            f"📚 {event.get('subject', 'Не указано')}\n"
+            f"🏫 {event.get('room', 'Не указано')}\n"
+            f"✍️ {event.get('teacher', 'Не указано')}\n\n"
+        )
 
     return formatted_schedule
 
