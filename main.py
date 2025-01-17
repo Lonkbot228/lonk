@@ -92,23 +92,47 @@ def format_combined_schedule(target_date):
 def format_schedule(web_data, ics_schedule, target_date):
     formatted_schedule = f"📅 <b>{format_date_russian(target_date)}</b>\n\n"
     lines = web_data.split('\n')
-    events = []
+    web_events = []
 
     # Извлечение данных из веб-расписания
-    for line in lines:
+    for i, line in enumerate(lines):
         line = line.strip()
         if "Кабинет:" in line:
+            # Извлечение времени, кабинета и преподавателя
             time = extract_data(line, "Время")
             room = extract_data(line, "Кабинет")
             teacher = extract_data(line, "Преподаватель")
-            events.append({"time": time, "room": room, "teacher": teacher})
+            
+            # Попытка извлечь название предмета из строки выше
+            subject = lines[i - 1].strip() if i > 0 else "Не указано"
 
-    # Объединение и сортировка
-    combined_schedule = sorted(events + ics_schedule, key=lambda x: x["time"])
+            web_events.append({
+                "time": time,
+                "room": room,
+                "teacher": teacher,
+                "subject": subject,
+            })
+
+    # Объединение веб-расписания с iCalendar
+    combined_schedule = []
+    for web_event in web_events:
+        # Найти соответствующий iCalendar-событие по времени
+        ics_event = next((e for e in ics_schedule if e["time"] == web_event["time"]), None)
+
+        combined_schedule.append({
+            "time": web_event["time"],
+            "room": ics_event["room"] if ics_event else web_event["room"],
+            "teacher": ics_event["teacher"] if ics_event else web_event["teacher"],
+            "subject": web_event["subject"],  # Предмет из веб-метода
+        })
+
+    # Сортировка по времени
+    combined_schedule.sort(key=lambda x: x["time"])
 
     for event in combined_schedule:
         formatted_schedule += (
             f"🕒 <b>{event['time']}</b>\n"
+            f"📚 {event['subject']}\n"
             f"🏫 {event['room']}\n"
             f"✍️ {event['teacher']}\n\n"
         )
