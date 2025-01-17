@@ -92,8 +92,14 @@ def format_combined_schedule(target_date):
     if calendar:
         ics_schedule = get_schedule_from_ics(calendar, target_date)
 
-    web_schedule = get_schedule_from_web()
-    formatted_schedule = format_schedule(web_schedule, ics_schedule, target_date)
+    # Если расписание за target_date не найдено в iCalendar, используем Selenium
+    if not ics_schedule:
+        web_schedule = get_schedule_from_web()
+        formatted_schedule = format_schedule(web_schedule, [], target_date)
+    else:
+        web_schedule = ""  # Пустая строка, так как данные из веба не нужны
+        formatted_schedule = format_schedule(web_schedule, ics_schedule, target_date)
+
     return formatted_schedule
 
 # Функция для форматирования расписания
