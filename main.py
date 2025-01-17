@@ -111,16 +111,20 @@ def format_schedule(web_data, ics_schedule, target_date):
             teacher = extract_data(line, "Преподаватель")
             events.append({"time": time, "room": room, "teacher": teacher})
 
-    # Объединение и сортировка
-    combined_schedule = sorted(events + ics_schedule, key=lambda x: x["time"])
+    # Если расписание из iCalendar пустое, используем только данные из веба
+    if not ics_schedule:
+        combined_schedule = sorted(events, key=lambda x: x["time"])
+    else:
+        # Объединение и сортировка
+        combined_schedule = sorted(events + ics_schedule, key=lambda x: x["time"])
 
     for event in combined_schedule:
         subject = event.get("subject", "Предмет не указан")
         formatted_schedule += (
-            f"📘 <b>{subject}</b>\n"
-            f"🕒 <b>{event['time']}</b>\n"
-            f"🏫 {event['room']}\n"
-            f"✍️ {event['teacher']}\n\n"
+            f"🕒 <b>{event['time']}</b>\n"  # Время пары
+            f"📘 {subject}\n"              # Название предмета (не жирным)
+            f"✍️ {event['teacher']}\n"     # Преподаватель
+            f"🏫 {event['room']}\n\n"      # Кабинет
         )
 
     return formatted_schedule
