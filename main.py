@@ -8,6 +8,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 from icalendar import Calendar
 import datetime
 import re
+from telegram import Update
+from telegram.ext import Application, CommandHandler
 
 # Настройка Selenium
 options = webdriver.ChromeOptions()
@@ -72,7 +74,7 @@ def get_schedule_from_web():
     group_select.send_keys('СА-17')
     submit_button = driver.find_element(By.NAME, 'stt')
     submit_button.click()
-    time.sleep(3)
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
     schedule_data = driver.find_element(By.TAG_NAME, 'body').text
     start_index = schedule_data.find('_________________')
     if start_index != -1:
