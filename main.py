@@ -11,7 +11,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler
 import datetime
 import re
-from babel.dates import format_date  # Для преобразования даты в русский формат
+from babel.dates import format_date
 
 # Настройка Selenium
 options = webdriver.ChromeOptions()
@@ -23,7 +23,7 @@ options.add_argument('--disable-software-rasterizer')
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-# Функция для чтения файла iCalendar (sa17.ics)
+# Функция для чтения файла iCalendar
 def read_ics_file():
     try:
         with open("sa17.ics", "r", encoding="utf-8") as file:
@@ -42,6 +42,11 @@ def extract_data(text, key):
     match = re.search(fr"{key}:\s*(.+?)\s*\|", text)
     return match.group(1).strip() if match else "Не указано"
 
+# Функция для извлечения названия предмета из summary
+def extract_subject(summary):
+    match = re.search(r"/(.*?)/", summary)
+    return match.group(1).strip() if match else "Не указано"
+
 # Функция для получения данных из iCalendar
 def get_schedule_from_ics(calendar, target_date):
     schedule = []
@@ -49,12 +54,15 @@ def get_schedule_from_ics(calendar, target_date):
         if component.name == "VEVENT":
             event_start = component.get("DTSTART").dt.date()
             if event_start == target_date:
+                summary = component.get("SUMMARY", "")
                 description = component.get("DESCRIPTION", "")
+                subject = extract_subject(summary)  # Извлекаем предмет
                 time = extract_data(description, "Время")
                 room = extract_data(description, "Кабинет")
                 teacher = extract_data(description, "Преподаватель")
 
                 schedule.append({
+                    "subject": subject,
                     "time": time,
                     "room": room,
                     "teacher": teacher,
@@ -107,7 +115,9 @@ def format_schedule(web_data, ics_schedule, target_date):
     combined_schedule = sorted(events + ics_schedule, key=lambda x: x["time"])
 
     for event in combined_schedule:
+        subject = event.get("subject", "Предмет не указан")
         formatted_schedule += (
+            f"📘 <b>{subject}</b>\n"
             f"🕒 <b>{event['time']}</b>\n"
             f"🏫 {event['room']}\n"
             f"✍️ {event['teacher']}\n\n"
