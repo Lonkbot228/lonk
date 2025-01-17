@@ -45,15 +45,18 @@ def get_schedule_from_ics(calendar, target_date):
             event_start = component.get("DTSTART").dt.date()
             if event_start == target_date:
                 description = component.get("DESCRIPTION", "")
-                time_match = re.search(r"Время:\s*(\d{2}:\d{2})", description)
-                room_match = re.search(r"Кабинет:\s*(.*?)\s*\|", description)  # Исправлено
-                teacher_match = re.search(r"Преподаватель:\s*(.*?)\s*\|", description)  # Исправлено
+                time_match = re.search(r"Время:\s*(\d{2}:\d{2})\s*—\s*(\d{2}:\d{2})", description)
+                room_match = re.search(r"Кабинет:\s*(.*?)\s*\|", description)
+                teacher_match = re.search(r"Преподаватель:\s*(.*?)\s*\|", description)
 
-                schedule.append({
-                    "time": time_match.group(1) if time_match else "Не указано",
-                    "room": room_match.group(1).strip() if room_match else "Не указано",
-                    "teacher": teacher_match.group(1).strip() if teacher_match else "Не указано",
-                })
+                if time_match:
+                    start_time = time_match.group(1)
+                    end_time = time_match.group(2)
+                    schedule.append({
+                        "time": f"{start_time} — {end_time}",
+                        "room": room_match.group(1).strip() if room_match else "Не указано",
+                        "teacher": teacher_match.group(1).strip() if teacher_match else "Не указано",
+                    })
     return schedule
 
 # Функция для получения расписания через Selenium
@@ -85,7 +88,7 @@ def format_combined_schedule(target_date):
 
 # Функция для сортировки по времени
 def sort_schedule_by_time(events):
-    return sorted(events, key=lambda x: datetime.datetime.strptime(x['time'], '%H:%M'))
+    return sorted(events, key=lambda x: datetime.datetime.strptime(x['time'].split(' — ')[0], '%H:%M'))
 
 # Функция для форматирования расписания
 def format_schedule(web_data, ics_schedule, target_date):
