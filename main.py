@@ -4,40 +4,39 @@ import io
 import re
 import requests
 import openpyxl
-from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackContext
 
-# Ссылка на папку Google Drive
-DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
+# ID публичной папки Google Drive
+DRIVE_FOLDER_ID = "1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
+
 
 def get_file_id_from_folder(target_date: datetime.date) -> str | None:
-    """Ищет файл с нужной датой в названии в общедоступной папке Google Drive и возвращает file_id."""
+    """Ищет файл с нужной датой в названии в публичной папке Google Drive."""
     session = requests.Session()
-    response = session.get(DRIVE_FOLDER_URL)
-    response.raise_for_status()
     
-    # Парсим HTML
-    soup = BeautifulSoup(response.text, "html.parser")
+    # Google API публичного доступа к папке
+    url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}?usp=sharing"
+    response = session.get(url)
+    
+    # Проверяем, что ответ корректен
+    if response.status_code != 200:
+        return None
     
     # Формат имени файла (например, "02.04.2025.xlsx")
     file_name = target_date.strftime("%d.%m.%Y") + ".xlsx"
     
-    # Ищем все ссылки на файлы
-    for link in soup.find_all("a"):
-        href = link.get("href")
-        if href and "drive.google.com/file/d/" in href:
-            if file_name in link.text:
-                return re.search(r"file/d/([a-zA-Z0-9_-]+)", href).group(1)
+    # Ищем file_id в содержимом
+    match = re.search(rf'"([a-zA-Z0-9_-]+)"\s*,\s*\[\["{file_name}"', response.text)
     
-    return None
+    return match.group(1) if match else None
 
 
 def download_public_file(file_id: str) -> bytes:
-    """Скачивает публичный файл из Google Drive без аутентификации."""
+    """Скачивает публичный файл из Google Drive."""
     url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    response = requests.get(url)
+    response = requests.get(url, allow_redirects=True)
     response.raise_for_status()
     return response.content
 
