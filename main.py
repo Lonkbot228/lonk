@@ -8,22 +8,14 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackContext
 
 # Google Drive API
-from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# ID папки Google Drive
+# ID папки Google Drive (файлы в папке общедоступны)
 DRIVE_FOLDER_ID = "1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
 
-# Путь к JSON с учетными данными для Google API
-SERVICE_ACCOUNT_FILE = "path/to/your-service-account.json"
-
-# Авторизация Google Drive API
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES
-)
-drive_service = build("drive", "v3", credentials=credentials)
+# Создаём сервис для Google Drive (без аутентификации, так как папка общедоступна)
+drive_service = build("drive", "v3")
 
 
 async def find_file_id_by_date(target_date: datetime.date) -> str:
@@ -92,7 +84,7 @@ async def parse_schedule(file_bytes: bytes) -> str:
                 break
 
         if room or teacher:
-            schedule_lines.append(f"📎{sheet_name}")
+            schedule_lines.append(f"📎 {sheet_name}")  # добавлен пробел после иконки
             schedule_lines.append(f"🔑{room}")
             schedule_lines.append(f"✍️{teacher}\n")
 
