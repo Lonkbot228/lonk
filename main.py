@@ -2,41 +2,43 @@ import os
 import datetime
 import io
 import re
+import requests
 import openpyxl
-from telegram import Update
-from telegram.constants import ParseMode
+from bs4 import BeautifulSoup
+from telegram import Update, ParseMode
 from telegram.ext import Application, CommandHandler, CallbackContext
 
-# Google Drive API
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+# Ссылка на папку Google Drive
+DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
 
-# ID папки Google Drive (файлы в папке общедоступны)
-DRIVE_FOLDER_ID = "1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
-
-# Создаём сервис для Google Drive (без аутентификации, так как папка общедоступна)
-drive_service = build("drive", "v3")
-
-
-async def find_file_id_by_date(target_date: datetime.date) -> str:
-    """Ищет файл в Google Drive по дате. Возвращает file_id, если найден."""
+def get_file_id_from_folder(target_date: datetime.date) -> str | None:
+    """Ищет файл с нужной датой в названии в общедоступной папке Google Drive и возвращает file_id."""
+    session = requests.Session()
+    response = session.get(DRIVE_FOLDER_URL)
+    response.raise_for_status()
+    
+    # Парсим HTML
+    soup = BeautifulSoup(response.text, "html.parser")
+    
+    # Формат имени файла (например, "02.04.2025.xlsx")
     file_name = target_date.strftime("%d.%m.%Y") + ".xlsx"
-    query = f"'{DRIVE_FOLDER_ID}' in parents and name = '{file_name}' and mimeType != 'application/vnd.google-apps.folder'"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get("files", [])
-    return files[0]["id"] if files else None
+    
+    # Ищем все ссылки на файлы
+    for link in soup.find_all("a"):
+        href = link.get("href")
+        if href and "drive.google.com/file/d/" in href:
+            if file_name in link.text:
+                return re.search(r"file/d/([a-zA-Z0-9_-]+)", href).group(1)
+    
+    return None
 
 
-async def download_file(file_id: str) -> bytes:
-    """Скачивает файл из Google Drive по file_id и возвращает его содержимое."""
-    request = drive_service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    fh.seek(0)
-    return fh.read()
+def download_public_file(file_id: str) -> bytes:
+    """Скачивает публичный файл из Google Drive без аутентификации."""
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.content
 
 
 async def find_target_file() -> tuple[bytes, datetime.date] | tuple[None, None]:
@@ -44,22 +46,22 @@ async def find_target_file() -> tuple[bytes, datetime.date] | tuple[None, None]:
     today = datetime.date.today()
 
     # 1. Сегодня
-    file_id = await find_file_id_by_date(today)
+    file_id = get_file_id_from_folder(today)
     if file_id:
-        return await download_file(file_id), today
+        return download_public_file(file_id), today
 
     # 2. Завтра или послезавтра
     for delta in (1, 2):
         target_date = today + datetime.timedelta(days=delta)
-        file_id = await find_file_id_by_date(target_date)
+        file_id = get_file_id_from_folder(target_date)
         if file_id:
-            return await download_file(file_id), target_date
+            return download_public_file(file_id), target_date
 
     # 3. Вчера
     target_date = today - datetime.timedelta(days=1)
-    file_id = await find_file_id_by_date(target_date)
+    file_id = get_file_id_from_folder(target_date)
     if file_id:
-        return await download_file(file_id), target_date
+        return download_public_file(file_id), target_date
 
     return None, None
 
@@ -84,7 +86,7 @@ async def parse_schedule(file_bytes: bytes) -> str:
                 break
 
         if room or teacher:
-            schedule_lines.append(f"📎 {sheet_name}")  # добавлен пробел после иконки
+            schedule_lines.append(f"📎{sheet_name}")
             schedule_lines.append(f"🔑{room}")
             schedule_lines.append(f"✍️{teacher}\n")
 
