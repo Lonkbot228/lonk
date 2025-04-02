@@ -7,7 +7,8 @@ from io import BytesIO
 import requests
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Настройки логирования
