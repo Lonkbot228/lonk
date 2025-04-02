@@ -5,7 +5,8 @@ import re
 import requests
 import openpyxl
 from bs4 import BeautifulSoup
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackContext
 
 # Ссылка на папку Google Drive
