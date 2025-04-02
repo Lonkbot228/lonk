@@ -1,5 +1,4 @@
-selenium
-webdriver-manager
-python-telegram-bot
-icalendar
-Babel
+openpyxl==3.1.2
+python-telegram-bot==20.3
+google-api-python-client==2.75.0
+google-auth==2.21.0
