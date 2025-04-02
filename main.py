@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # URL публичной папки Google Диска (замените на вашу ссылку)
-PUBLIC_FOLDER_URL = "https://drive.google.com/drive/folders/1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag""
+PUBLIC_FOLDER_URL = "https://drive.google.com/drive/folders/1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
 
 # Регулярное выражение для имени файла вида DD.MM.YYYY.xlsx
 FILENAME_REGEX = re.compile(r'(\d{2}\.\d{2}\.\d{4}\.xlsx)')
