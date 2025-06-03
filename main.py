@@ -1,235 +1,367 @@
 import os
-import re
+import io
 import logging
-import datetime
-from io import BytesIO
+import pandas as pd
+from datetime import datetime
 
-import requests
-from bs4 import BeautifulSoup
-from openpyxl import load_workbook
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
-# Настройки логирования
+from telegram import Update, ChatAction
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+
+# ────────────────────────────────────────────────────────────
+#  Настройки для Google Drive API
+# ────────────────────────────────────────────────────────────
+
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+FOLDER_ID = '1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag'  # ← Замените своим ID папки
+
+# ────────────────────────────────────────────────────────────
+#  Telegram-токен (API key) из переменной окружения
+# ────────────────────────────────────────────────────────────
+
+TELEGRAM_TOKEN = os.environ.get("TOKEN")
+if not TELEGRAM_TOKEN:
+    logging.error("Переменная окружения TOKEN не установлена.")
+    exit(1)
+
+# ────────────────────────────────────────────────────────────
+#  Устанавливаем логирование
+# ────────────────────────────────────────────────────────────
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# URL публичной папки Google Диска (замените на вашу ссылку)
-PUBLIC_FOLDER_URL = "https://drive.google.com/drive/folders/1kUYiSAafghhYR0ARyXwPW1HZPpHcFIag"
+# ────────────────────────────────────────────────────────────
+#  Функции для работы с Google Drive
+# ────────────────────────────────────────────────────────────
 
-# Регулярное выражение для имени файла вида DD.MM.YYYY.xlsx
-FILENAME_REGEX = re.compile(r'(\d{2}\.\d{2}\.\d{4}\.xlsx)')
+def authenticate_drive() -> 'googleapiclient.discovery.Resource':
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w', encoding='utf-8') as token_file:
+            token_file.write(creds.to_json())
 
-def get_candidate_dates():
-    """Возвращает список дат в нужном порядке для поиска файла."""
-    today = datetime.date.today()
-    # 1. Сегодня
-    dates = [today]
-    # 2. Завтра и послезавтра
-    tomorrow = today + datetime.timedelta(days=1)
-    day_after = today + datetime.timedelta(days=2)
-    dates.extend([tomorrow, day_after])
-    # 3. Вчера
-    yesterday = today - datetime.timedelta(days=1)
-    dates.append(yesterday)
-    return dates
+    return build('drive', 'v3', credentials=creds)
 
-def format_date_for_filename(date_obj: datetime.date) -> str:
-    """Форматирует дату в строку DD.MM.YYYY.xlsx"""
-    return date_obj.strftime("%d.%m.%Y") + ".xlsx"
 
-def fetch_folder_page():
-    """Получает HTML страницы публичной папки Google Диска."""
+def get_latest_xlsx_file_id(service) -> dict:
+    query = (
+        f"'{FOLDER_ID}' in parents and trashed = false and "
+        "mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+    )
+    results = service.files().list(
+        q=query,
+        pageSize=5,
+        fields="files(id, name, modifiedTime)",
+        orderBy="modifiedTime desc"
+    ).execute()
+    files = results.get('files', [])
+    if not files:
+        raise FileNotFoundError("В папке не найдено ни одного .xlsx-файла.")
+    return files[0]
+
+
+def download_xlsx_to_memory(service, file_id: str) -> io.BytesIO:
+    request = service.files().get_media(fileId=file_id)
+    bio = io.BytesIO()
+    downloader = MediaIoBaseDownload(bio, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    bio.seek(0)
+    return bio
+
+
+def parse_schedule_from_xlsx(xlsx_stream: io.BytesIO) -> list:
+    all_sheets: dict = pd.read_excel(
+        xlsx_stream,
+        sheet_name=None,
+        header=None,
+        dtype=str
+    )
+
+    entries = []
+    for sheet_name, df in all_sheets.items():
+        df = df.fillna('')
+        n_rows, n_cols = df.shape
+        for i in range(n_rows):
+            for j in range(n_cols):
+                if str(df.iat[i, j]).strip() == "СА-17":
+                    if j == 1:
+                        cabinet = df.iat[i, 0] if n_cols > 0 else ''
+                        teacher = df.iat[i, 2] if n_cols > 2 else ''
+                        entries.append({'subject': sheet_name, 'teacher': teacher, 'cabinet': cabinet})
+                    elif j == 4:
+                        cabinet = df.iat[i, 3] if n_cols > 3 else ''
+                        teacher = df.iat[i, 5] if n_cols > 5 else ''
+                        entries.append({'subject': sheet_name, 'teacher': teacher, 'cabinet': cabinet})
+    return entries
+
+
+# ────────────────────────────────────────────────────────────
+#  Утилиты для форматирования даты из имени файла
+# ────────────────────────────────────────────────────────────
+
+def format_date_from_filename(filename: str) -> str:
+    name, _ = os.path.splitext(filename)
     try:
-        response = requests.get(PUBLIC_FOLDER_URL)
-        response.raise_for_status()
-        return response.text
-    except Exception as e:
-        logger.error("Ошибка получения страницы папки: %s", e)
-        return None
+        date_obj = datetime.strptime(name, "%d.%m.%Y")
+    except ValueError:
+        return ""
+    months = [
+        "января", "февраля", "марта", "апреля",
+        "мая", "июня", "июля", "августа",
+        "сентября", "октября", "ноября", "декабря"
+    ]
+    weekdays = [
+        "понедельник", "вторник", "среда",
+        "четверг", "пятница", "суббота", "воскресенье"
+    ]
+    day = date_obj.day
+    month_name = months[date_obj.month - 1]
+    weekday_name = weekdays[date_obj.weekday()]
+    return f"{day} {month_name}, {weekday_name}"
 
-def parse_files_from_folder(html_text):
+
+# ────────────────────────────────────────────────────────────
+#  Handlers Telegram-бота
+# ────────────────────────────────────────────────────────────
+
+def start_command(update: Update, context: CallbackContext) -> None:
+    chat = update.effective_chat
+    thread_id = getattr(update.effective_message, 'message_thread_id', None)
+    text = (
+        "Дарова, пиши /schedule или\n"
+        "/расписание, а я тебе кину актуальное расписание, понял?"
+    )
+    if thread_id:
+        context.bot.send_message(chat_id=chat.id, text=text, parse_mode='Markdown', message_thread_id=thread_id)
+    else:
+        update.message.reply_text(text)
+
+
+def _typing_job(context: CallbackContext) -> None:
     """
-    Из HTML-страницы получает словарь: {имя_файла: (file_id, download_url)}.
-    Предполагается, что ссылки на файлы содержат шаблон /file/d/FILE_ID/view
-    и где-то рядом присутствует имя файла.
+    Это функция, которая будет вызываться JobQueue каждые несколько секунд,
+    чтобы послать ChatAction.TYPING в тот же чат (и тред, если есть).
     """
-    files = {}
-    soup = BeautifulSoup(html_text, "lxml")
-    # Ищем все ссылки, в которых встречается /file/d/
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        match = re.search(r'/file/d/([a-zA-Z0-9_-]+)/', href)
-        if match:
-            file_id = match.group(1)
-            text = a.get_text(strip=True)
-            # Ищем имя файла по регулярному выражению
-            fname_match = FILENAME_REGEX.search(text)
-            if fname_match:
-                file_name = fname_match.group(1)
-                # Формируем ссылку для скачивания
-                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-                files[file_name] = (file_id, download_url)
-    return files
+    job_data = context.job.context  # в job.context мы храним кортеж (chat_id, thread_id)
+    chat_id, thread_id = job_data
+    if thread_id:
+        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
+    else:
+        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-def find_schedule_file():
+
+def schedule_command(update: Update, context: CallbackContext) -> None:
     """
-    Поиск файла с расписанием по алгоритму:
-      1. Ищем файл за сегодня.
-      2. Если нет, ищем за завтрашний или послезавтрашний день.
-      3. Если нет, ищем за вчерашний день.
-    Возвращает кортеж (имя_файла, download_url) или (None, None).
+    /schedule — показывает «typing…», публикует «⏳ Секундочку…», запускает непрерывное typing… через JobQueue,
+    затем скачивает и парсит расписание, после чего обновляет «⏳ Секундочку…» в конечный ответ
+    и останавливает JobQueue.
     """
-    html_text = fetch_folder_page()
-    if not html_text:
-        return None, None
+    chat = update.effective_chat
+    thread_id = getattr(update.effective_message, 'message_thread_id', None)
+    chat_id = chat.id
 
-    files = parse_files_from_folder(html_text)
-    candidate_dates = get_candidate_dates()
-    for date_obj in candidate_dates:
-        fname = format_date_for_filename(date_obj)
-        if fname in files:
-            _, download_url = files[fname]
-            logger.info("Найден файл: %s", fname)
-            return fname, download_url
-    logger.info("Файл расписания не найден по заданным датам.")
-    return None, None
+    # 1) Запускаем первый ChatAction.TYPING (для немедленной реакции)
+    if thread_id:
+        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
+    else:
+        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-def download_file(download_url):
-    """Скачивает файл по ссылке и возвращает его содержимое в виде BytesIO."""
-    try:
-        response = requests.get(download_url)
-        response.raise_for_status()
-        return BytesIO(response.content)
-    except Exception as e:
-        logger.error("Ошибка скачивания файла: %s", e)
-        return None
+    # 2) Отправляем временное сообщение «⏳ Секундочку…»
+    if thread_id:
+        msg = context.bot.send_message(
+            chat_id=chat_id,
+            text="⏳ Секундочку, получаю расписание…",
+            message_thread_id=thread_id
+        )
+    else:
+        msg = update.message.reply_text("⏳ Секундочку, получаю расписание…")
 
-def extract_schedule_from_workbook(wb):
-    """
-    Обрабатывает книгу .xlsx.
-    Для каждого листа, название которого начинается с "Пара",
-    ищется строка, содержащая "СА-17". Если найдено:
-      - Если во 2-м столбце содержится "СА-17", берем данные из 1-го и 3-го столбцов.
-      - Если в 5-м столбце содержится "СА-17", берем данные из 4-го и 6-го столбцов.
-    Возвращает словарь вида:
-       { sheet_title: {"room": значение, "teacher": значение} }
-    """
-    schedule = {}
-    for sheet_name in wb.sheetnames:
-        if not sheet_name.startswith("Пара"):
-            continue
-        ws = wb[sheet_name]
-        room = None
-        teacher = None
-        for row in ws.iter_rows(values_only=True):
-            if row is None or len(row) < 6:
-                continue
-            # Проверяем наличие "СА-17" в 2-м столбце (индекс 1)
-            if row[1] is not None and "СА-17" in str(row[1]):
-                part1 = str(row[0]).strip() if row[0] is not None else ""
-                part2 = str(row[2]).strip() if row[2] is not None else ""
-                room = (part1 + part2).strip()
-            # Проверяем наличие "СА-17" в 5-м столбце (индекс 4)
-            if row[4] is not None and "СА-17" in str(row[4]):
-                part1 = str(row[3]).strip() if row[3] is not None else ""
-                part2 = str(row[5]).strip() if row[5] is not None else ""
-                teacher = " ".join(filter(None, [part1, part2])).strip()
-            # Если нашли хотя бы одно из значений, можно завершить поиск в этом листе
-            if room or teacher:
-                break
-        if room or teacher:
-            schedule[sheet_name] = {"room": room, "teacher": teacher}
-    return schedule
-
-def format_schedule_message(schedule_data, file_date: datetime.date):
-    """
-    Форматирует итоговое сообщение согласно шаблону:
-    
-    🗓️ **2 апреля**  
-
-    📎 **Пара 1**  
-    🔑 103  
-    ✍️ Старых О.А.  
-    """
-    # Форматируем дату, например, "2 апреля"
-    day = file_date.day
-    month = file_date.strftime("%B")  # название месяца на английском; можно заменить на русские названия
-    # Для примера заменим английские названия на русские (можно расширить)
-    months_ru = {
-        "January": "января", "February": "февраля", "March": "марта",
-        "April": "апреля", "May": "мая", "June": "июня",
-        "July": "июля", "August": "августа", "September": "сентября",
-        "October": "октября", "November": "ноября", "December": "декабря"
-    }
-    month_ru = months_ru.get(month, month)
-    message_lines = [f"🗓️ **{day} {month_ru}**", ""]
-    # Для каждого листа ("Пара X")
-    for sheet, data in schedule_data.items():
-        message_lines.append(f"📎 **{sheet}**")
-        if data.get("room"):
-            message_lines.append(f"🔑 {data['room']}")
-        if data.get("teacher"):
-            message_lines.append(f"✍️ {data['teacher']}")
-        message_lines.append("")  # пустая строка между парами
-    return "\n".join(message_lines)
-
-async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /schedule."""
-    # Ищем файл расписания
-    fname, download_url = find_schedule_file()
-    if not fname or not download_url:
-        await update.message.reply_text("Файл расписания не найден.")
-        return
-
-    # Определяем дату файла из имени (формат DD.MM.YYYY.xlsx)
-    try:
-        file_date = datetime.datetime.strptime(fname[:-5], "%d.%m.%Y").date()
-    except Exception as e:
-        file_date = datetime.date.today()
-
-    file_stream = download_file(download_url)
-    if not file_stream:
-        await update.message.reply_text("Ошибка скачивания файла.")
-        return
+    # 3) Запускаем повторяющийся Job, чтобы каждые 4 секунды слать typing…
+    #    Сохраним объект Job, чтобы потом отменить
+    job = context.job_queue.run_repeating(
+        _typing_job,
+        interval=4,         # каждые 4 секунды
+        first=4,            # первый запуск через 4 секунды
+        context=(chat_id, thread_id)
+    )
 
     try:
-        wb = load_workbook(filename=file_stream, data_only=True)
+        # 4) Авторизация и поиск файла
+        drive_service = authenticate_drive()
+        latest_file = get_latest_xlsx_file_id(drive_service)
+        file_name = latest_file['name']
+
+        # 5) Скачивание
+        xlsx_stream = download_xlsx_to_memory(drive_service, latest_file['id'])
+
+        # 6) Парсинг
+        entries = parse_schedule_from_xlsx(xlsx_stream)
+
+        # 7) Форматирование итогового сообщения
+        date_str = format_date_from_filename(file_name)
+        header = f"*📅 {date_str}*\n\n" if date_str else "*📅*\n\n"
+
+        if not entries:
+            full_response = header + "❗ Расписание пустое."
+        else:
+            blocks = []
+            for e in entries:
+                blocks.append(
+                    f"*{e['subject']}*\n"
+                    f"✍️ {e['teacher']}\n"
+                    f"🏫 {e['cabinet']}"
+                )
+            full_response = header + "\n\n".join(blocks)
+
+        # 8) Остановим Job с typing…, так как мы почти готовы редактировать сообщение
+        job.schedule_removal()
+
+        # 9) Проверяем длину и либо редактируем msg, либо разбиваем на части
+        MAX_LEN = 4000  # с запасом (Telegram позволяет до ~4096 символов)
+        if len(full_response) <= MAX_LEN:
+            # просто редактируем единственное сообщение
+            if thread_id:
+                msg.edit_text(
+                    text=full_response,
+                    parse_mode='Markdown',
+                    message_thread_id=thread_id
+                )
+            else:
+                msg.edit_text(
+                    text=full_response,
+                    parse_mode='Markdown'
+                )
+        else:
+            # разбиваем на несколько сообщений, но первое — редактируем
+            chunks = []
+            current = ""
+            for line in full_response.split("\n"):
+                if len(current) + len(line) + 1 > MAX_LEN:
+                    chunks.append(current)
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+            if current:
+                chunks.append(current)
+
+            # редактируем первое сообщение
+            first_chunk = chunks[0]
+            if thread_id:
+                msg.edit_text(
+                    text=first_chunk,
+                    parse_mode='Markdown',
+                    message_thread_id=thread_id
+                )
+            else:
+                msg.edit_text(
+                    text=first_chunk,
+                    parse_mode='Markdown'
+                )
+
+            # отправляем оставшиеся части как новые сообщения
+            for part in chunks[1:]:
+                if thread_id:
+                    context.bot.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        parse_mode='Markdown',
+                        message_thread_id=thread_id
+                    )
+                else:
+                    context.bot.send_message(
+                        chat_id=chat_id,
+                        text=part,
+                        parse_mode='Markdown'
+                    )
+
     except Exception as e:
-        logger.error("Ошибка открытия файла: %s", e)
-        await update.message.reply_text("Ошибка обработки файла.")
-        return
+        # Если произошла ошибка, отменяем Job, и редактируем «⏳ Секундочку…» на текст об ошибке
+        job.schedule_removal()
+        error_text = f"❌ Произошла ошибка при получении расписания:\n{e}"
+        logger.exception("Ошибка в schedule_command")
+        if thread_id:
+            msg.edit_text(text=error_text, message_thread_id=thread_id)
+        else:
+            msg.edit_text(text=error_text)
 
-    schedule_data = extract_schedule_from_workbook(wb)
-    if not schedule_data:
-        await update.message.reply_text("Не найдено расписание для СА-17.")
-        return
 
-    message = format_schedule_message(schedule_data, file_date)
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+def russian_schedule_handler(update: Update, context: CallbackContext) -> None:
+    """
+    /расписание — перенаправляет в schedule_command.
+    """
+    schedule_command(update, context)
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start."""
-    welcome_text = "Привет! Используй команду /schedule для получения расписания."
-    await update.message.reply_text(welcome_text)
+
+def help_command(update: Update, context: CallbackContext) -> None:
+    """
+    /help — отправляет справку в тему (если есть).
+    """
+    chat = update.effective_chat
+    thread_id = getattr(update.effective_message, 'message_thread_id', None)
+    text = (
+        "Бот для получения расписания.\n\n"
+        "Доступные команды:\n"
+        "/start — показать приветствие\n"
+        "/schedule — получить расписание (или /расписание)\n"
+        "/help — показать это сообщение"
+    )
+    if thread_id:
+        context.bot.send_message(chat_id=chat.id, text=text, parse_mode='Markdown', message_thread_id=thread_id)
+    else:
+        update.message.reply_text(text)
+
+
+def unknown_command(update: Update, context: CallbackContext) -> None:
+    """
+    Обработчик для неизвестных команд — отвечает в тему (если есть).
+    """
+    chat = update.effective_chat
+    thread_id = getattr(update.effective_message, 'message_thread_id', None)
+    text = "окак. Используй /help для списка доступных комманд."
+    if thread_id:
+        context.bot.send_message(chat_id=chat.id, text=text, message_thread_id=thread_id)
+    else:
+        update.message.reply_text(text)
+
+
+# ────────────────────────────────────────────────────────────
+#  Основная функция
+# ────────────────────────────────────────────────────────────
 
 def main():
-    # Получаем токен из переменной окружения
-    token = os.environ.get("TOKEN")
-    if not token:
-        logger.error("Переменная окружения TOKEN не установлена")
-        return
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    # Создаем приложение бота с использованием токена из переменной окружения
-    application = Application.builder().token(token).build()
+    # Регистрируем команды и обработчики
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(CommandHandler("schedule", schedule_command))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(MessageHandler(Filters.regex(r'^/расписание$'), russian_schedule_handler))
+    dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("schedule", schedule_command))
+    # Здесь мы не делаем ничего с job_queue: он уже встроен в updater
+    updater.start_polling()
+    logger.info("Бот запущен и ожидает команд.")
+    updater.idle()
 
-    application.run_polling()
 
 if __name__ == '__main__':
     main()
