@@ -189,9 +189,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     chat = update.effective_chat
     thread_id = update.effective_message.message_thread_id
-    text = (
-        "Дарова, пиши /schedule, а я тебе кину актуальное расписание, понял?"
-    )
+    text = "Дарова, пиши /schedule, а я тебе кину актуальное расписание, понял?"
     if thread_id:
         await context.bot.send_message(
             chat_id=chat.id, text=text, parse_mode="Markdown", message_thread_id=thread_id
@@ -229,38 +227,20 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     thread_id = update.effective_message.message_thread_id
     text = "окак. Используй /help для списка доступных комманд."
     if thread_id:
-        await context.bot.send_message(
-            chat_id=chat.id, text=text, message_thread_id=thread_id
-        )
+        await context.bot.send_message(chat_id=chat.id, text=text, message_thread_id=thread_id)
     else:
         await update.message.reply_text(text)
 
 
-async def _typing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    JobQueue: шлём ChatAction.TYPING в тот же чат и тему, чтобы пользователь видел, что бот «печатает…».
-    """
-    job_data = context.job.data  # в job.data хранится dict {"chat_id":…, "thread_id":…}
-    chat_id = job_data["chat_id"]
-    thread_id = job_data["thread_id"]
-    if thread_id:
-        await context.bot.send_chat_action(
-            chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id
-        )
-    else:
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-
-
 async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /schedule — показывает «typing…», публикует «⏳ Секундочку…», запускает JobQueue,
-    скачивает и парсит расписание, останавливает JobQueue, и отправляет итог пользователю.
+    /schedule — шлём один ChatAction.TYPING, скачиваем и парсим расписание, затем отправляем ответ.
     """
     chat = update.effective_chat
     thread_id = update.effective_message.message_thread_id
     chat_id = chat.id
 
-    # 1) Немедленно шлём ChatAction.TYPING
+    # 1) Шлём ChatAction.TYPING один раз
     if thread_id:
         await context.bot.send_chat_action(
             chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id
@@ -268,38 +248,19 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     else:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # 2) Отправляем временное сообщение «⏳ Секундочку…»
-    if thread_id:
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text="⏳ Секундочку, получаю расписание…",
-            message_thread_id=thread_id,
-        )
-    else:
-        msg = await update.message.reply_text("⏳ Секундочку, получаю расписание…")
-
-    # 3) Запускаем JobQueue, чтобы каждые 4 секунды слать typing…
-    #    В PTB v20+ JobQueue доступен как context.application.job_queue
-    job = context.application.job_queue.run_repeating(
-        _typing_job,
-        interval=4,  # каждые 4 секунды
-        first=4,  # первый запуск через 4 секунды
-        data={"chat_id": chat_id, "thread_id": thread_id},
-    )
-
     try:
-        # 4) Авторизация и поиск файла в Google Drive
+        # 2) Авторизация и поиск файла в Google Drive
         drive_service = authenticate_drive()
         latest_file = get_latest_xlsx_file_id(drive_service)
         file_name = latest_file["name"]
 
-        # 5) Скачиваем xlsx в память
+        # 3) Скачиваем xlsx в память
         xlsx_stream = download_xlsx_to_memory(drive_service, latest_file["id"])
 
-        # 6) Парсим расписание
+        # 4) Парсим расписание
         entries = parse_schedule_from_xlsx(xlsx_stream)
 
-        # 7) Формируем текст ответа
+        # 5) Формируем текст ответа
         date_str = format_date_from_filename(file_name)
         header = f"*📅 {date_str}*\n\n" if date_str else "*📅*\n\n"
 
@@ -315,23 +276,22 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 )
             full_response = header + "\n\n".join(blocks)
 
-        # 8) Останавливаем JobQueue — больше не нужно отправлять typing…
-        job.schedule_removal()
-
-        # 9) Отправляем или редактируем сообщение в зависимости от длины
-        MAX_LEN = 4000  # запас, Telegram позволяет ~4096 символов
+        # 6) Отправляем окончательный ответ (или разбиваем на части, если слишком длинный)
+        MAX_LEN = 4000  # Telegram позволяет до ~4096 символов
         if len(full_response) <= MAX_LEN:
-            # Редактируем единственное сообщение
             if thread_id:
-                await msg.edit_text(
+                await context.bot.send_message(
+                    chat_id=chat_id,
                     text=full_response,
                     parse_mode="Markdown",
                     message_thread_id=thread_id,
                 )
             else:
-                await msg.edit_text(text=full_response, parse_mode="Markdown")
+                await context.bot.send_message(
+                    chat_id=chat_id, text=full_response, parse_mode="Markdown"
+                )
         else:
-            # Разбиваем на куски и отправляем их по очереди
+            # Разбиваем на несколько сообщений
             chunks = []
             current = ""
             for line in full_response.split("\n"):
@@ -343,19 +303,8 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if current:
                 chunks.append(current)
 
-            # Редактируем первое сообщение
-            first_chunk = chunks[0]
-            if thread_id:
-                await msg.edit_text(
-                    text=first_chunk,
-                    parse_mode="Markdown",
-                    message_thread_id=thread_id,
-                )
-            else:
-                await msg.edit_text(text=first_chunk, parse_mode="Markdown")
-
-            # Отправляем остальные части как новые сообщения
-            for part in chunks[1:]:
+            # Отправляем все части
+            for part in chunks:
                 if thread_id:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -369,14 +318,12 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     )
 
     except Exception as e:
-        # При ошибке отменяем Job и редактируем сообщение с текстом ошибки
-        job.schedule_removal()
         error_text = f"❌ Произошла ошибка при получении расписания:\n{e}"
         logger.exception("Ошибка в schedule_command")
         if thread_id:
-            await msg.edit_text(text=error_text, message_thread_id=thread_id)
+            await context.bot.send_message(chat_id=chat_id, text=error_text, message_thread_id=thread_id)
         else:
-            await msg.edit_text(text=error_text)
+            await context.bot.send_message(chat_id=chat_id, text=error_text)
 
 
 # ────────────────────────────────────────────────────────────
