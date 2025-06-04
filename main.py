@@ -3,6 +3,7 @@ import io
 import logging
 import pandas as pd
 from datetime import datetime
+from itertools import cycle
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -55,7 +56,6 @@ def authenticate_drive() -> 'googleapiclient.discovery.Resource':
             creds = flow.run_local_server(port=0)
         with open('token.json', 'w', encoding='utf-8') as token_file:
             token_file.write(creds.to_json())
-
     return build('drive', 'v3', credentials=creds)
 
 
@@ -94,7 +94,6 @@ def parse_schedule_from_xlsx(xlsx_stream: io.BytesIO) -> list:
         header=None,
         dtype=str
     )
-
     entries = []
     for sheet_name, df in all_sheets.items():
         df = df.fillna('')
@@ -139,36 +138,16 @@ def format_date_from_filename(filename: str) -> str:
 
 
 # ────────────────────────────────────────────────────────────
-#  Дополнительная функция для анимации точек
+#  Функция для отправки «typing…» через JobQueue
 # ────────────────────────────────────────────────────────────
 
-def _animate_dots_job(context: CallbackContext) -> None:
-    """
-    Каждые полсекунды/секунду редактируем сообщение, 
-    добавляя циклически от 1 до 3 точек к фразе:
-    «⏳ Секундочку, получаю расписание»
-    """
-    job_data = context.job.context
-    chat_id = job_data['chat_id']
-    thread_id = job_data['thread_id']
-    msg = job_data['msg']         # telegram.Message, чтобы редактировать
-    dots = job_data['dots']       # текущее число точек (0–2)
-
-    # Увеличиваем число точек циклически: 0→1→2→0
-    dots = (dots + 1) % 3
-    job_data['dots'] = dots
-
-    # Формируем новый текст: 1 точка, 2 точки, 3 точки (на 0 индексе будет 1 точка)
-    text = "⏳ Секундочку, получаю расписание" + "." * (dots + 1)
-
-    try:
-        if thread_id:
-            msg.edit_text(text=text, message_thread_id=thread_id)
-        else:
-            msg.edit_text(text=text)
-    except Exception as e:
-        # Если редактирование не удалось (например, уже удалили задачу), просто молча пропускаем
-        logger.debug(f"Не удалось отредактировать анимированное сообщение: {e}")
+def _typing_job(context: CallbackContext) -> None:
+    job_data = context.job.context  # (chat_id, thread_id)
+    chat_id, thread_id = job_data
+    if thread_id:
+        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
+    else:
+        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
 
 # ────────────────────────────────────────────────────────────
@@ -188,83 +167,79 @@ def start_command(update: Update, context: CallbackContext) -> None:
         update.message.reply_text(text)
 
 
-def _typing_job(context: CallbackContext) -> None:
-    """
-    Это функция, которая будет вызываться JobQueue каждые несколько секунд,
-    чтобы послать ChatAction.TYPING в тот же чат (и тред, если есть).
-    """
-    job_data = context.job.context  # в job.context мы храним кортеж (chat_id, thread_id)
-    chat_id, thread_id = job_data
-    if thread_id:
-        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
-    else:
-        context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-
-
 def schedule_command(update: Update, context: CallbackContext) -> None:
     """
-    /schedule — показывает «typing…», публикует «⏳ Секундочку, получаю расписание…» 
-    и запускает две повторяющиеся задачи в JobQueue:
-      1) _typing_job (каждые 4 секунды отправляет ChatAction.TYPING)
-      2) _animate_dots_job (каждую секунду «добавляет/убирает» точки в тексте)
-    Затем скачивает и парсит расписание, после чего редактирует сообщение 
-    на результат и останавливает обе задачи.
+    /schedule — показывает анимированное «⏳ Секундочку…», запускает typing и скачивает расписание,
+    после чего редактирует сообщение с результатом и останавливает анимацию.
     """
     chat = update.effective_chat
     thread_id = getattr(update.effective_message, 'message_thread_id', None)
     chat_id = chat.id
 
-    # 1) Запускаем первый ChatAction.TYPING (чтобы бот сразу показал «печатает…»)
+    # 1) Немедленный ChatAction.TYPING
     if thread_id:
         context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
     else:
         context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # 2) Отправляем временное сообщение «⏳ Секундочку, получаю расписание.» (с одной точкой)
+    # 2) Отправляем базовое сообщение с одной точкой
+    msg_text_base = "⏳ Секундочку, получаю расписание"
     if thread_id:
         msg = context.bot.send_message(
             chat_id=chat_id,
-            text="⏳ Секундочку, получаю расписание.",  # первая точка, дальше анимируем
+            text=f"{msg_text_base}.",
             message_thread_id=thread_id
         )
     else:
-        msg = update.message.reply_text("⏳ Секундочку, получаю расписание.")
+        msg = update.message.reply_text(f"{msg_text_base}.")
 
-    # 3) Запускаем повторяющийся Job для ChatAction.TYPING
-    job_typing = context.job_queue.run_repeating(
+    # 3) Запуск анимации точек (каждые 0.8 секунды)
+    dot_cycle = cycle(['.', '..', '...'])
+
+    def animate_dots(context: CallbackContext):
+        try:
+            next_dots = next(context.job.context['dot_cycle'])
+            context.bot.edit_message_text(
+                chat_id=context.job.context['chat_id'],
+                message_id=context.job.context['message_id'],
+                text=f"{msg_text_base}{next_dots}",
+                message_thread_id=context.job.context['thread_id']
+            )
+        except Exception:
+            # Возможно, сообщение уже изменили или его удалили
+            pass
+
+    animation_job = context.job_queue.run_repeating(
+        animate_dots,
+        interval=0.8,
+        first=0.8,
+        context={
+            'chat_id': chat_id,
+            'message_id': msg.message_id,
+            'thread_id': thread_id,
+            'dot_cycle': dot_cycle
+        }
+    )
+
+    # 4) Параллельно можно запускать Job для ChatAction.TYPING (каждые 4 секунды)
+    typing_job = context.job_queue.run_repeating(
         _typing_job,
-        interval=4,         # каждые 4 секунды
-        first=4,            # первый запуск через 4 секунды
+        interval=4,
+        first=4,
         context=(chat_id, thread_id)
     )
 
-    # 4) Запускаем повторяющийся Job для анимации точек
-    dots_context = {
-        'chat_id': chat_id,
-        'thread_id': thread_id,
-        'msg': msg,
-        'dots': 0            # изначально «1 точка» — за 0 инкрементом последует 1→2→3
-    }
-    job_dots = context.job_queue.run_repeating(
-        _animate_dots_job,
-        interval=1,         # каждую секунду меняем текст
-        first=1,            # первый запуск через 1 секунду
-        context=dots_context
-    )
-
     try:
-        # 5) Авторизация и поиск файла
+        # 5) Работа с Google Drive: авторизация и поиск файла
         drive_service = authenticate_drive()
         latest_file = get_latest_xlsx_file_id(drive_service)
         file_name = latest_file['name']
 
-        # 6) Скачивание
+        # 6) Скачивание и парсинг
         xlsx_stream = download_xlsx_to_memory(drive_service, latest_file['id'])
-
-        # 7) Парсинг
         entries = parse_schedule_from_xlsx(xlsx_stream)
 
-        # 8) Форматирование итогового сообщения
+        # 7) Формируем финальное сообщение
         date_str = format_date_from_filename(file_name)
         header = f"*📅 {date_str}*\n\n" if date_str else "*📅*\n\n"
 
@@ -280,12 +255,12 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                 )
             full_response = header + "\n\n".join(blocks)
 
-        # 9) Останавливаем обе задачи, так как результат готов
-        job_typing.schedule_removal()
-        job_dots.schedule_removal()
+        # 8) Остановим оба Job'а (анимацию точек и typing)
+        animation_job.schedule_removal()
+        typing_job.schedule_removal()
 
-        # 10) Редактируем первоначальное «⏳ Секундочку…» на итоговый текст
-        MAX_LEN = 4000  # с запасом (Telegram позволяет до ~4096 символов)
+        # 9) Редактируем сообщение на полный текст или разбиваем на части
+        MAX_LEN = 4000
         if len(full_response) <= MAX_LEN:
             if thread_id:
                 msg.edit_text(
@@ -299,7 +274,6 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                     parse_mode='Markdown'
                 )
         else:
-            # если текст очень длинный, разбиваем на части
             chunks = []
             current = ""
             for line in full_response.split("\n"):
@@ -311,7 +285,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
             if current:
                 chunks.append(current)
 
-            # редактируем первое сообщение
+            # Первую часть редактируем
             first_chunk = chunks[0]
             if thread_id:
                 msg.edit_text(
@@ -325,7 +299,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                     parse_mode='Markdown'
                 )
 
-            # отправляем оставшиеся части как новые сообщения
+            # Остальные части отправляем как новые сообщения
             for part in chunks[1:]:
                 if thread_id:
                     context.bot.send_message(
@@ -342,9 +316,9 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                     )
 
     except Exception as e:
-        # Если произошла ошибка, отменяем оба Job-а, и редактируем «⏳ Секундочку…» на текст об ошибке
-        job_typing.schedule_removal()
-        job_dots.schedule_removal()
+        # В случае ошибки — отменяем оба Job'а и показываем текст с ошибкой
+        animation_job.schedule_removal()
+        typing_job.schedule_removal()
         error_text = f"❌ Произошла ошибка при получении расписания:\n{e}"
         logger.exception("Ошибка в schedule_command")
         if thread_id:
@@ -385,7 +359,7 @@ def unknown_command(update: Update, context: CallbackContext) -> None:
     """
     chat = update.effective_chat
     thread_id = getattr(update.effective_message, 'message_thread_id', None)
-    text = "окак. Используй /help для списка доступных комманд."
+    text = "окак. Используй /help для списка доступных команд."
     if thread_id:
         context.bot.send_message(chat_id=chat.id, text=text, message_thread_id=thread_id)
     else:
@@ -407,7 +381,7 @@ def main():
     dp.add_handler(MessageHandler(Filters.regex(r'^/расписание$'), russian_schedule_handler))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    # job_queue встроен в updater, ничего дополнительно не нужно настраивать
+    # Запускаем бота
     updater.start_polling()
     logger.info("Бот запущен и ожидает команд.")
     updater.idle()
