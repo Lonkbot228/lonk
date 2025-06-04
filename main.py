@@ -232,9 +232,22 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(text)
 
 
+async def text_trigger_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Если пользователь просто пишет «пары» или «расписание» или «пары СА-17» (точно ничего более),
+    вызываем schedule_command.
+    """
+    raw = update.effective_message.text.strip().lower()
+    # Возможные триггеры (только слово «пары», «расписание» или «пары са-17» без дополнительного текста)
+    if raw in ("пары", "расписание") or raw == "пары са-17":
+        await schedule_command(update, context)
+    # Иначе — не реагируем, пусть дальше идут следующие хендлеры.
+
+
 async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    /schedule — шлём один ChatAction.TYPING, скачиваем и парсим расписание, затем отправляем ответ.
+    /schedule или вызов из text_trigger_handler:
+    Шлём один ChatAction.TYPING, скачиваем и парсим расписание, затем отправляем ответ.
     """
     chat = update.effective_chat
     thread_id = update.effective_message.message_thread_id
@@ -340,10 +353,19 @@ def main() -> None:
     # Строим приложение с указанным токеном
     app = ApplicationBuilder().token(token).build()
 
-    # Регистрируем хендлеры
+    # Регистрируем хендлеры команд
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("schedule", schedule_command))
+
+    # Регистрируем текстовый хендлер, который реагирует на сообщение,
+    # состоящее ровно из «пары», «расписание» или «пары СА-17»
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND, text_trigger_handler
+        )
+    )
+
     # Ловим все другие неизвестные команды
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
