@@ -39,6 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # ────────────────────────────────────────────────────────────
 #  Функции для работы с Google Drive
 # ────────────────────────────────────────────────────────────
@@ -148,15 +149,18 @@ def start_command(update: Update, context: CallbackContext) -> None:
         "Дарова, пиши /schedule или\n"
         "/расписание, а я тебе кину актуальное расписание, понял?"
     )
-    if thread_id:
-        context.bot.send_message(chat_id=chat.id, text=text, parse_mode='Markdown', message_thread_id=thread_id)
-    else:
-        update.message.reply_text(text)
+    # Всегда используем context.bot.send_message, чтобы учитывать темы (thread_id)
+    context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        parse_mode='Markdown',
+        message_thread_id=thread_id
+    )
 
 
 def _typing_job(context: CallbackContext) -> None:
     """
-    Job, который слать ChatAction.TYPING,
+    Job, который шлёт ChatAction.TYPING,
     пока идёт загрузка и парсинг расписания.
     """
     job_data = context.job.context  # кортеж (chat_id, thread_id)
@@ -195,7 +199,7 @@ def _animate_schedule_message(context: CallbackContext) -> None:
                 text=new_text
             )
     except Exception:
-        # Если сообщение уже недоступно или отменено
+        # Если сообщение уже недоступно (например, удалили или bot потерял доступ) — просто игнорируем
         pass
 
     # Сохраняем обновлённый счётчик обратно
@@ -207,7 +211,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
     /schedule — показывает «typing…», публикует «⏳ Секундочку, получаю расписание»,
     запускает два Job’а:
       1) отправлять ChatAction.TYPING каждые 4 секунды,
-      2) анимацию точек каждые 0.5 секунды (вместо 1 секунды).
+      2) анимацию точек каждые 1 секунду (или 0.5 для ускорённого варианта).
     Затем скачивает и парсит расписание, останавливает оба Job’а
     и заменяет временное сообщение на финальный текст.
     """
@@ -223,30 +227,26 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
 
     # 2) Отправляем начальное сообщение без точек
     base_text = "⏳ Секундочку, получаю расписание"
-    if thread_id:
-        msg = context.bot.send_message(
-            chat_id=chat_id,
-            text=base_text,
-            message_thread_id=thread_id
-        )
-    else:
-        msg = update.message.reply_text(base_text)
-
+    msg = context.bot.send_message(
+        chat_id=chat_id,
+        text=base_text,
+        message_thread_id=thread_id
+    )
     message_id = msg.message_id
 
-    # 3) Job для ChatAction.TYPING каждые 4 сек
+    # 3) Job для ChatAction.TYPING каждые 4 секунд
     typing_job = context.job_queue.run_repeating(
         _typing_job,
-        interval=10,         # каждые 4 секунды
-        first=0.2,            # первый запуск через 4 секунды
+        interval=4,         # каждые 4 секунды
+        first=4,            # первый запуск через 4 секунды
         context=(chat_id, thread_id)
     )
 
-    # 4) Job для анимации точек — теперь с интервалом 0.5 секунды (в два раза быстрее)
+    # 4) Job для анимации точек — каждую секунду
     animate_job = context.job_queue.run_repeating(
         _animate_schedule_message,
-        interval=0.5,  # обновляем каждую 0.5 секунды вместо 1
-        first=0.5,     # первый запуск через 0.5 секунды
+        interval=1,  # обновляем каждую 1 секунду
+        first=1,
         context=(chat_id, thread_id, message_id, base_text, 0)  # current_dots = 0
     )
 
@@ -282,26 +282,18 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
         typing_job.schedule_removal()
         animate_job.schedule_removal()
 
-        # 10) Редактируем временное сообщение на финальное
+        # 10) Редактируем временное сообщение на финальный текст
         MAX_LEN = 4000  # с запасом
         if len(full_response) <= MAX_LEN:
-            if thread_id:
-                context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=full_response,
-                    parse_mode='Markdown',
-                    message_thread_id=thread_id
-                )
-            else:
-                context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=full_response,
-                    parse_mode='Markdown'
-                )
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=full_response,
+                parse_mode='Markdown',
+                message_thread_id=thread_id
+            )
         else:
-            # Разбиваем на несколько сообщений, если слишком длинно
+            # Если текст слишком длинный — разбиваем на части
             chunks = []
             current = ""
             for line in full_response.split("\n"):
@@ -315,58 +307,36 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
 
             # Редактируем первое сообщение
             first_chunk = chunks[0]
-            if thread_id:
-                context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=first_chunk,
-                    parse_mode='Markdown',
-                    message_thread_id=thread_id
-                )
-            else:
-                context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=first_chunk,
-                    parse_mode='Markdown'
-                )
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=first_chunk,
+                parse_mode='Markdown',
+                message_thread_id=thread_id
+            )
 
             # Отправляем оставшиеся части
             for part in chunks[1:]:
-                if thread_id:
-                    context.bot.send_message(
-                        chat_id=chat_id,
-                        text=part,
-                        parse_mode='Markdown',
-                        message_thread_id=thread_id
-                    )
-                else:
-                    context.bot.send_message(
-                        chat_id=chat_id,
-                        text=part,
-                        parse_mode='Markdown'
-                    )
+                context.bot.send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    parse_mode='Markdown',
+                    message_thread_id=thread_id
+                )
 
     except Exception as e:
-        # Если ошибка, отменяем оба Job’а и редактируем сообщение на текст об ошибке
+        # Если произошла ошибка, отменяем оба Job’а и редактируем сообщение на текст об ошибке
         typing_job.schedule_removal()
         animate_job.schedule_removal()
 
         error_text = f"❌ Произошла ошибка при получении расписания:\n{e}"
         logger.exception("Ошибка в schedule_command")
-        if thread_id:
-            context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=error_text,
-                message_thread_id=thread_id
-            )
-        else:
-            context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=error_text
-            )
+        context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=error_text,
+            message_thread_id=thread_id
+        )
 
 
 def russian_schedule_handler(update: Update, context: CallbackContext) -> None:
@@ -378,7 +348,7 @@ def russian_schedule_handler(update: Update, context: CallbackContext) -> None:
 
 def help_command(update: Update, context: CallbackContext) -> None:
     """
-    /help — отправляет справку в тему (если есть).
+    /help — отправляет справку.
     """
     chat = update.effective_chat
     thread_id = getattr(update.effective_message, 'message_thread_id', None)
@@ -389,23 +359,26 @@ def help_command(update: Update, context: CallbackContext) -> None:
         "/schedule — получить расписание (или /расписание)\n"
         "/help — показать это сообщение"
     )
-    if thread_id:
-        context.bot.send_message(chat_id=chat.id, text=text, parse_mode='Markdown', message_thread_id=thread_id)
-    else:
-        update.message.reply_text(text)
+    context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        parse_mode='Markdown',
+        message_thread_id=thread_id
+    )
 
 
 def unknown_command(update: Update, context: CallbackContext) -> None:
     """
-    Обработчик для неизвестных команд — отвечает в тему (если есть).
+    Обработчик для неизвестных команд — отвечает в той же теме.
     """
     chat = update.effective_chat
     thread_id = getattr(update.effective_message, 'message_thread_id', None)
-    text = "окак. Используй /help для списка доступных комманд."
-    if thread_id:
-        context.bot.send_message(chat_id=chat.id, text=text, message_thread_id=thread_id)
-    else:
-        update.message.reply_text(text)
+    text = "окак. Используй /help для списка доступных команд."
+    context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        message_thread_id=thread_id
+    )
 
 
 # ────────────────────────────────────────────────────────────
@@ -423,7 +396,6 @@ def main():
     dp.add_handler(MessageHandler(Filters.regex(r'^/расписание$'), russian_schedule_handler))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    # JobQueue уже встроена в updater
     updater.start_polling()
     logger.info("Бот запущен и ожидает команд.")
     updater.idle()
