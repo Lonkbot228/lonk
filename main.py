@@ -237,7 +237,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
     # 3) Job для ChatAction.TYPING каждые 4 сек
     typing_job = context.job_queue.run_repeating(
         _typing_job,
-        interval=0.5,         # каждые 4 секунды
+        interval=4,         # каждые 4 секунды
         first=0.2,            # первый запуск через 4 секунды
         context=(chat_id, thread_id)
     )
