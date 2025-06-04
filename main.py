@@ -156,10 +156,10 @@ def start_command(update: Update, context: CallbackContext) -> None:
 
 def _typing_job(context: CallbackContext) -> None:
     """
-    Этот Job следит за тем, чтобы бот продолжал слать ChatAction.TYPING,
+    Job, который слать ChatAction.TYPING,
     пока идёт загрузка и парсинг расписания.
     """
-    job_data = context.job.context  # в job.context мы храним кортеж (chat_id, thread_id)
+    job_data = context.job.context  # кортеж (chat_id, thread_id)
     chat_id, thread_id = job_data
     if thread_id:
         context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
@@ -169,14 +169,14 @@ def _typing_job(context: CallbackContext) -> None:
 
 def _animate_schedule_message(context: CallbackContext) -> None:
     """
-    Этот Job будет периодически редактировать сообщение с текстом «⏳ Секундочку, получаю расписание…»,
-    добавляя/удаляя точки в конце, чтобы выглядело как «думает».
-    В job.context храним: (chat_id, thread_id, message_id, base_text, current_dots).
+    Job для анимации точек «думает»:
+    в job.context храним (chat_id, thread_id, message_id, base_text, current_dots).
+    Каждую итерацию увеличиваем current_dots от 1 до 3 и редактируем сообщение.
     """
     job_data = context.job.context
     chat_id, thread_id, message_id, base_text, current_dots = job_data
 
-    # Обновляем счётчик точек: от 1 до 3, затем снова в 1
+    # Увеличиваем счётчик: от 1 до 3, затем снова 1
     next_dots = current_dots + 1 if current_dots < 3 else 1
     new_text = f"{base_text}{'.' * next_dots}"
 
@@ -195,31 +195,33 @@ def _animate_schedule_message(context: CallbackContext) -> None:
                 text=new_text
             )
     except Exception:
-        # На случай, если сообщение уже удалено или потеряно доступ
+        # Если сообщение уже недоступно или отменено
         pass
 
-    # Сохраняем обновлённый счётчик точек обратно в job.context
+    # Сохраняем обновлённый счётчик обратно
     context.job.context = (chat_id, thread_id, message_id, base_text, next_dots)
 
 
 def schedule_command(update: Update, context: CallbackContext) -> None:
     """
-    /schedule — показывает «typing…», публикует «⏳ Секундочку, получаю расписание…»,
-    запускает Job-анимацию точек и Job для ChatAction.TYPING,
-    затем скачивает и парсит расписание, после чего останавливает оба Job’а
+    /schedule — показывает «typing…», публикует «⏳ Секундочку, получаю расписание»,
+    запускает два Job’а:
+      1) отправлять ChatAction.TYPING каждые 4 секунды,
+      2) анимацию точек каждые 0.5 секунды (вместо 1 секунды).
+    Затем скачивает и парсит расписание, останавливает оба Job’а
     и заменяет временное сообщение на финальный текст.
     """
     chat = update.effective_chat
     thread_id = getattr(update.effective_message, 'message_thread_id', None)
     chat_id = chat.id
 
-    # 1) Мгновенный ChatAction.TYPING
+    # 1) Первичный ChatAction.TYPING
     if thread_id:
         context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
     else:
         context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
-    # 2) Отправляем базовое сообщение без точек
+    # 2) Отправляем начальное сообщение без точек
     base_text = "⏳ Секундочку, получаю расписание"
     if thread_id:
         msg = context.bot.send_message(
@@ -232,20 +234,20 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
 
     message_id = msg.message_id
 
-    # 3) Запускаем Job, чтобы слать ChatAction.TYPING каждые 4 секунды
+    # 3) Job для ChatAction.TYPING каждые 4 сек
     typing_job = context.job_queue.run_repeating(
         _typing_job,
-        interval=4,         # каждые 4 секунды
-        first=4,            # первый запуск через 4 секунды
+        interval=1,         # каждые 4 секунды
+        first=1,            # первый запуск через 4 секунды
         context=(chat_id, thread_id)
     )
 
-    # 4) Запускаем отдельный Job для анимации точек каждые 1 секунду
+    # 4) Job для анимации точек — теперь с интервалом 0.5 секунды (в два раза быстрее)
     animate_job = context.job_queue.run_repeating(
         _animate_schedule_message,
-        interval=1,  # обновляем каждую секунду
-        first=1,
-        context=(chat_id, thread_id, message_id, base_text, 0)  # current_dots = 0 (пока без точек)
+        interval=0.5,  # обновляем каждую 0.5 секунды вместо 1
+        first=0.5,     # первый запуск через 0.5 секунды
+        context=(chat_id, thread_id, message_id, base_text, 0)  # current_dots = 0
     )
 
     try:
@@ -276,12 +278,12 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                 )
             full_response = header + "\n\n".join(blocks)
 
-        # 9) Останавливаем оба Job’а, так как мы почти готовы ответить
+        # 9) Останавливаем оба Job’а (анимация точек и typing)
         typing_job.schedule_removal()
         animate_job.schedule_removal()
 
-        # 10) Редактируем временное сообщение на финальный текст
-        MAX_LEN = 4000  # с запасом (Telegram позволяет до ~4096 символов)
+        # 10) Редактируем временное сообщение на финальное
+        MAX_LEN = 4000  # с запасом
         if len(full_response) <= MAX_LEN:
             if thread_id:
                 context.bot.edit_message_text(
@@ -299,7 +301,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                     parse_mode='Markdown'
                 )
         else:
-            # Если текст слишком длинный — разбиваем на части
+            # Разбиваем на несколько сообщений, если слишком длинно
             chunks = []
             current = ""
             for line in full_response.split("\n"):
@@ -329,7 +331,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                     parse_mode='Markdown'
                 )
 
-            # Отправляем оставшиеся части как новые сообщения
+            # Отправляем оставшиеся части
             for part in chunks[1:]:
                 if thread_id:
                     context.bot.send_message(
@@ -346,7 +348,7 @@ def schedule_command(update: Update, context: CallbackContext) -> None:
                     )
 
     except Exception as e:
-        # Если произошла ошибка, отменяем оба Job’а и редактируем сообщение на текст об ошибке
+        # Если ошибка, отменяем оба Job’а и редактируем сообщение на текст об ошибке
         typing_job.schedule_removal()
         animate_job.schedule_removal()
 
@@ -421,7 +423,7 @@ def main():
     dp.add_handler(MessageHandler(Filters.regex(r'^/расписание$'), russian_schedule_handler))
     dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    # Тут JobQueue уже встроена в updater
+    # JobQueue уже встроена в updater
     updater.start_polling()
     logger.info("Бот запущен и ожидает команд.")
     updater.idle()
