@@ -190,8 +190,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat = update.effective_chat
     thread_id = update.effective_message.message_thread_id
     text = (
-        "Дарова, пиши /schedule или\n"
-        "/расписание, а я тебе кину актуальное расписание, понял?"
+        "Дарова, пиши /schedule, а я тебе кину актуальное расписание, понял?"
     )
     if thread_id:
         await context.bot.send_message(
@@ -211,7 +210,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Бот для получения расписания.\n\n"
         "Доступные команды:\n"
         "/start — показать приветствие\n"
-        "/schedule — получить расписание (или /расписание)\n"
+        "/schedule — получить расписание\n"
         "/help — показать это сообщение"
     )
     if thread_id:
@@ -379,13 +378,6 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await msg.edit_text(text=error_text)
 
 
-async def russian_schedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /расписание — перенаправляем в schedule_command.
-    """
-    await schedule_command(update, context)
-
-
 # ────────────────────────────────────────────────────────────
 #  Основная функция — создаём и запускаем Application
 # ────────────────────────────────────────────────────────────
@@ -404,10 +396,6 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("schedule", schedule_command))
-    # Обработчик для команды /расписание (кириллица)
-    app.add_handler(
-        CommandHandler("расписание", russian_schedule_handler)
-    )
     # Ловим все другие неизвестные команды
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
