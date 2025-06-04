@@ -144,7 +144,7 @@ def format_date_from_filename(filename: str) -> str:
 
 def _animate_dots_job(context: CallbackContext) -> None:
     """
-    Каждые полсекунды/секунду редактируем сообщение, 
+    Каждые полсекунды/секунду редактируем сообщение, 
     добавляя циклически от 1 до 3 точек к фразе:
     «⏳ Секундочку, получаю расписание»
     """
@@ -203,11 +203,11 @@ def _typing_job(context: CallbackContext) -> None:
 
 def schedule_command(update: Update, context: CallbackContext) -> None:
     """
-    /schedule — показывает «typing…», публикует «⏳ Секундочку, получаю расписание…» 
+    /schedule — показывает «typing…», публикует «⏳ Секундочку, получаю расписание…» 
     и запускает две повторяющиеся задачи в JobQueue:
       1) _typing_job (каждые 4 секунды отправляет ChatAction.TYPING)
       2) _animate_dots_job (каждую секунду «добавляет/убирает» точки в тексте)
-    Затем скачивает и парсит расписание, после чего редактирует сообщение 
+    Затем скачивает и парсит расписание, после чего редактирует сообщение 
     на результат и останавливает обе задачи.
     """
     chat = update.effective_chat
