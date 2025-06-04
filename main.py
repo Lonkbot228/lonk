@@ -279,7 +279,8 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         msg = await update.message.reply_text("⏳ Секундочку, получаю расписание…")
 
     # 3) Запускаем JobQueue, чтобы каждые 4 секунды слать typing…
-    job = context.job_queue.run_repeating(
+    #    В PTB v20+ JobQueue доступен как context.application.job_queue
+    job = context.application.job_queue.run_repeating(
         _typing_job,
         interval=4,  # каждые 4 секунды
         first=4,  # первый запуск через 4 секунды
